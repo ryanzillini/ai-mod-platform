@@ -1,0 +1,20 @@
+# Python & Virtual Environments
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Apple / OS files
+.DS_Store
+.AppleDouble
+
+# Local Data, Logs & Traces
+*.log
+benchmarks/*.json
+benchmarks/*.csv
+
+# Hugging Face / Downloaded Model Weights
+models/
+huggingface/
+.cache/
