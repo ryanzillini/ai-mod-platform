@@ -15,14 +15,19 @@ Usage (from repo root on your machine):
 from __future__ import annotations
 
 import json
+import sys
 import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Ensure project root is on sys.path when running as a script
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from src.slm_engine import LocalSLMEngine
 
-ROOT = Path(__file__).resolve().parents[1]
 DATASET_PATH = ROOT / "data" / "golden_dataset.json"
 RESULTS_DIR = ROOT / "results"
 
