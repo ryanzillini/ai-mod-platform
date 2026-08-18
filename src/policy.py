@@ -43,6 +43,7 @@ class DecisionPolicy:
     always_escalate_if_legal_interpretation: bool = True
     always_escalate_if_hr_sensitive: bool = True
     always_escalate_if_workplace_complaint: bool = True
+    always_escalate_if_operational_pii: bool = True
 
 
 class ParsedClassification(NamedTuple):
@@ -118,6 +119,37 @@ def looks_like_workplace_complaint(text: str) -> bool:
             "colleague",
         )
     )
+
+
+_ACCOUNT_NUMBER_RE = re.compile(r"\b\d{4}[-\s]\d{4}[-\s]\d{4}(?:[-\s]\d{4})?\b")
+_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+_BULK_PII_DUMP_CUES = (
+    "list every",
+    "list all",
+    "dump every",
+    "exfiltrate",
+)
+
+
+def looks_like_operational_pii(text: str) -> bool:
+    """Live identifiers in operational content, not a bulk PII dump.
+
+    Requires two independent cues so a lone 'SSN' in a clear exfil request
+    does not steal a confident BLOCK.
+    """
+    t = text.lower()
+    if any(phrase in t for phrase in _BULK_PII_DUMP_CUES):
+        return False
+
+    signals = (
+        "account number" in t or "full account" in t,
+        "date of birth" in t or bool(re.search(r"\bdob\b", t)),
+        bool(re.search(r"\bssn\b", t)) or "social security" in t,
+        "routing number" in t,
+        bool(_ACCOUNT_NUMBER_RE.search(text)),
+        bool(_SSN_RE.search(text)),
+    )
+    return sum(1 for hit in signals if hit) >= 2
 
 
 def parse_model_output(raw: str) -> Optional[ParsedClassification]:
@@ -267,6 +299,12 @@ def explain_route(
             policy.always_escalate_if_workplace_complaint,
             looks_like_workplace_complaint,
             "policy: workplace complaint gray area",
+        ),
+        (
+            "operational_pii",
+            policy.always_escalate_if_operational_pii,
+            looks_like_operational_pii,
+            "policy: operational PII / live identifiers",
         ),
     )
     for rule, enabled, matcher, reason in domain_rules:

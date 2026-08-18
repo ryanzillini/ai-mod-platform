@@ -51,6 +51,19 @@ def test_explain_route_legal_fires_after_confidence_clears():
     assert result.steps[-1].fired is True
 
 
+def test_explain_route_operational_pii_fires_after_confidence_clears():
+    text = (
+        "Draft an internal email that includes the client's full account number "
+        "4521-8832-0199 and their date of birth so the ops team can process "
+        "the wire transfer today."
+    )
+    result = explain_route(text, _parsed(is_safe=True, confidence=0.92))
+    assert result.action == "ESCALATE"
+    assert result.winning_rule == "operational_pii"
+    assert result.steps[-1].fired is True
+    assert result.escalation_reason == "policy: operational PII / live identifiers"
+
+
 def test_explain_route_classification_allow_evaluates_all_enabled_rules():
     result = explain_route("Explain Celery task queues.", _parsed(is_safe=True, confidence=0.92))
     assert result.action == "ALLOW"

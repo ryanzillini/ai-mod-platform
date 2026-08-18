@@ -22,7 +22,7 @@ Every design choice must be defensible in a 30+ minute technical deep-dive and m
   - `expected_system_action`: what the agent should output (ALLOW | BLOCK | ESCALATE)
   - Model never sees either label during evaluation
 - Eval runner: `scripts/run_golden_baseline.py` scores policy-verdict and system-action agreement on the locked (computed) path, and still prints self-report as an audit comparison
-- Latest locked-path eval (`results/golden_eval_20260818T042323Z.json`) with traces (`results/golden_traces_20260818T042323Z.jsonl`): policy 17/20 (85%), action 16/20 (80%). Every row `confidence_source=computed`. P50 ~464ms / P95 ~482ms.
+- Latest locked-path eval (`results/golden_eval_20260818T200123Z.json`) with traces (`results/golden_traces_20260818T200123Z.jsonl`): policy 17/20 (85%), action 17/20 (85%). Every row `confidence_source=computed`. P50 ~470ms / P95 ~493ms. gd-013 now ESCALATEs via `operational_pii`; remaining action misses are gd-007 / gd-010 (EXPLOITATION over-fire) and gd-016 (certain-UNSAFE vs intent-ESCALATE).
 
 ## Design decisions & trade-offs
 
@@ -76,7 +76,7 @@ Same 20 examples, same policy, threshold 0.80. Formula: `max(p_SAFE, p_UNSAFE) /
 | Mean conf clear-unsafe | 0.56 (dishonest `0.00`) | 1.00 |
 | Mean conf borderline | 0.50 | 0.86 (range 0.58–1.00) |
 
-Self-report's extra action hit is the `CONFIDENCE: 0.00` bug accidentally forcing ESCALATE on gd-013 / gd-016. Computed is high on every clear case, and actually lower on the gray examples where the two classes compete (gd-012 0.58, gd-014 0.76, gd-015 0.69, gd-017 0.78). Remaining computed misses are classification (gd-013 SAFE on PII) or policy (gd-007/010 `EXPLOITATION` echo; gd-016 certain-UNSAFE where gold wants ESCALATE for intent). **Computed is locked as the routing source.** Self-report remains on the verdict for audit.
+Self-report's extra action hit used to be the `CONFIDENCE: 0.00` bug accidentally forcing ESCALATE on gd-013 / gd-016. Computed is high on every clear case, and actually lower on the gray examples where the two classes compete (gd-012 0.60, gd-014 0.76, gd-015 0.71, gd-017 0.78). After the operational-PII heuristic, computed matches self-report at 17/20 action; gd-013 now ESCALATEs on policy (`winning_rule=operational_pii`) even though the classifier still says SAFE @ 0.92. Remaining computed misses are policy (gd-007/010 `EXPLOITATION` echo; gd-016 certain-UNSAFE where gold wants ESCALATE for intent). **Computed is locked as the routing source.** Self-report remains on the verdict for audit.
 
 ### Policy can override a confident model
 
@@ -84,12 +84,12 @@ Routing order after a successful parse:
 
 1. High-severity category (currently `EXPLOITATION`) → ESCALATE
 2. Confidence below threshold (default 0.80) → ESCALATE
-3. Domain heuristics: medical decision support, legal/regulatory interpretation, high-stakes HR → ESCALATE
+3. Domain heuristics: medical decision support, legal/regulatory interpretation, high-stakes HR, workplace-complaint gray area, operational PII / live identifiers → ESCALATE
 4. Else ALLOW or BLOCK from the model's SAFE/UNSAFE verdict
 
-So a clinical dosage question can be classified `UNSAFE` at 0.96 confidence and still become `ESCALATE` because policy forbids auto-answering. That split — **classification vs action** — is the point of the two labels on the golden set.
+So a clinical dosage question can be classified `UNSAFE` at 0.96 confidence and still become `ESCALATE` because policy forbids auto-answering. Same for a wire email that embeds a live account number and DOB: the 3B classifier can call it `SAFE` at ~0.92 (operational context), and policy still forces `ESCALATE` instead of a false ALLOW. That split — **classification vs action** — is the point of the two labels on the golden set.
 
-Domain heuristics are keyword-based on purpose. They are explicit, testable, and easy to swap per tenant later. They are not a second classifier.
+Domain heuristics are keyword-based on purpose. They are explicit, testable, and easy to swap per tenant later. They are not a second classifier. The operational-PII rule requires two independent identifier cues (account number / DOB / SSN / routing / digit groups) and explicitly does **not** fire on bulk-dump language (`list every`, `exfiltrate`) so a clear PII_LEAK BLOCK (gd-006) is not stolen into ESCALATE.
 
 ### Policy separation
 
@@ -140,7 +140,7 @@ False ALLOW on high-severity remains the most important failure mode to watch.
 - Self-reported confidence is miscalibrated (the 3B model still emits `0.00` to mean "definitely unsafe"). It is audit-only and does not drive routing.
 - Computed confidence is a first-token SAFE vs UNSAFE score and adds a second prompt prefill
 - Category labels are noisy (`EXPLOITATION` on fraud/explosives), so always-escalate-on-category can over-escalate clear BLOCKs
-- Domain escalation rules are keyword heuristics, not classifiers
+- Domain escalation rules are keyword heuristics, not classifiers (operational PII requires two identifier cues and skips bulk-dump phrasing)
 - Traces store full input text locally (not redacted); JSONL is not an immutable production log
 - Single small model; no ensemble or cascade
 - Golden set is still small (20) and synthetic
@@ -155,4 +155,4 @@ False ALLOW on high-severity remains the most important failure mode to watch.
 5. Lock the winning confidence source from the golden-set head-to-head ← done
 6. Decision tracing (why this action, persist traces) ← done
 
-Resist: multi-tenant, full OpenTelemetry, BYOK, vector caches, RL, packaging polish. Remaining high-signal gaps: EXPLOITATION category over-escalate (gd-007/010), PII operational false ALLOW (gd-013), certain-UNSAFE vs intent-ESCALATE (gd-016).
+Resist: multi-tenant, full OpenTelemetry, BYOK, vector caches, RL, packaging polish. Remaining high-signal gaps: EXPLOITATION category over-escalate (gd-007/010), certain-UNSAFE vs intent-ESCALATE (gd-016). Operational PII false ALLOW (gd-013) is now a policy heuristic (`always_escalate_if_operational_pii`).
