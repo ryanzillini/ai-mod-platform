@@ -13,6 +13,7 @@ __pycache__/
 *.log
 benchmarks/*.json
 benchmarks/*.csv
+traces/
 
 # Hugging Face / Downloaded Model Weights
 models/

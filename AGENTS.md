@@ -15,9 +15,9 @@ This is supporting evidence alongside real production experience (Khoros multi-L
 
 ## Current priority order
 1. Golden dataset (done – dual labels: policy_verdict + expected_system_action)
-2. Real confidence estimation that drives routing
+2. Real confidence estimation that drives routing (done – token-distribution locked; self-report is audit-only)
 3. Explicit ESCALATE path (low confidence OR policy-forced)
-4. Decision tracing
+4. Decision tracing (done – structured why + JSONL)
 5. Minimal evaluation harness against golden set
 6. Separable policy layer
 

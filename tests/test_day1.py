@@ -41,6 +41,7 @@ def test_parse_failure_escalates_without_model():
     assert decision.action == "ESCALATE"
     assert decision.escalation_reason == "parse_failure"
     assert decision.confidence_score == 0.0
+    assert decision.confidence_source == "parse_failure"
     assert decision.raw_model_output == "not a structured response"
 
 
@@ -66,6 +67,7 @@ def test_engine_decide_applies_policy_routing():
     assert decision.action == action == "ESCALATE"
     assert decision.policy_verdict == "ALLOW"
     assert decision.escalation_reason == reason
+    assert decision.confidence_source == "self_report_fallback"
 
 
 def test_inference_latency_benchmark(slm):
@@ -90,5 +92,5 @@ def test_inference_latency_benchmark(slm):
     print(f" Samples: {len(latencies)} | P50: {p50:.2f}ms | P95: {p95:.2f}ms")
     print(f"=======================================================")
 
-    # Structured 4-line output uses more tokens than the Day-1 one-liner.
-    assert p95 < 400.0, f"P95 Latency too high: {p95}ms"
+    # Structured generation plus a second VERDICT: logprob prefill.
+    assert p95 < 800.0, f"P95 Latency too high: {p95}ms"

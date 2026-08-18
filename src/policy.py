@@ -179,6 +179,110 @@ def parse_model_output(raw: str) -> Optional[ParsedClassification]:
     )
 
 
+class RoutingStep(NamedTuple):
+    rule: str
+    fired: bool
+    detail: str
+
+
+class RoutingResult(NamedTuple):
+    action: Action
+    escalation_reason: Optional[str]
+    steps: tuple[RoutingStep, ...]
+    winning_rule: str
+
+
+def explain_route(
+    text: str,
+    parsed: ParsedClassification,
+    policy: DecisionPolicy | None = None,
+) -> RoutingResult:
+    """Route a classification and record which rules were evaluated.
+
+    Short-circuits: rules after the winner are not evaluated. That is the
+    real control flow, not a reconstructed post-hoc explanation.
+    """
+    policy = policy or DecisionPolicy()
+    categories = parsed.categories
+    confidence = parsed.confidence
+    steps: list[RoutingStep] = []
+
+    matched = [cat for cat in categories if cat in policy.always_escalate_categories]
+    if matched:
+        steps.append(
+            RoutingStep("high_severity_category", True, ",".join(matched))
+        )
+        return RoutingResult(
+            "ESCALATE",
+            "policy: high-severity category",
+            tuple(steps),
+            "high_severity_category",
+        )
+    steps.append(
+        RoutingStep(
+            "high_severity_category",
+            False,
+            "none" if not categories else ",".join(categories),
+        )
+    )
+
+    if confidence < policy.confidence_threshold:
+        detail = f"{confidence:.2f} < {policy.confidence_threshold:.2f}"
+        steps.append(RoutingStep("low_confidence", True, detail))
+        return RoutingResult(
+            "ESCALATE",
+            f"low confidence ({detail})",
+            tuple(steps),
+            "low_confidence",
+        )
+    steps.append(
+        RoutingStep(
+            "low_confidence",
+            False,
+            f"{confidence:.2f} >= {policy.confidence_threshold:.2f}",
+        )
+    )
+
+    domain_rules = (
+        (
+            "medical_decision_support",
+            policy.always_escalate_if_medical_advice,
+            looks_like_medical_advice,
+            "policy: medical decision support",
+        ),
+        (
+            "legal_regulatory",
+            policy.always_escalate_if_legal_interpretation,
+            looks_like_legal_question,
+            "policy: legal / regulatory interpretation",
+        ),
+        (
+            "hr_sensitive",
+            policy.always_escalate_if_hr_sensitive,
+            looks_like_hr_sensitive,
+            "policy: high-stakes HR communication",
+        ),
+        (
+            "workplace_complaint",
+            policy.always_escalate_if_workplace_complaint,
+            looks_like_workplace_complaint,
+            "policy: workplace complaint gray area",
+        ),
+    )
+    for rule, enabled, matcher, reason in domain_rules:
+        if not enabled:
+            continue
+        if matcher(text):
+            steps.append(RoutingStep(rule, True, "matched"))
+            return RoutingResult("ESCALATE", reason, tuple(steps), rule)
+        steps.append(RoutingStep(rule, False, "no match"))
+
+    action: Action = "ALLOW" if parsed.is_safe else "BLOCK"
+    detail = "SAFE → ALLOW" if parsed.is_safe else "UNSAFE → BLOCK"
+    steps.append(RoutingStep("classification", True, detail))
+    return RoutingResult(action, None, tuple(steps), "classification")
+
+
 def route_decision(
     text: str,
     parsed: ParsedClassification,
@@ -189,35 +293,8 @@ def route_decision(
     Order matches the v1 brief: high-severity category, then low confidence,
     then domain policy rules, else ALLOW/BLOCK from the classification.
     """
-    policy = policy or DecisionPolicy()
-    categories = parsed.categories
-    confidence = parsed.confidence
-
-    if any(cat in policy.always_escalate_categories for cat in categories):
-        return "ESCALATE", "policy: high-severity category"
-
-    if confidence < policy.confidence_threshold:
-        return (
-            "ESCALATE",
-            f"low confidence ({confidence:.2f} < {policy.confidence_threshold:.2f})",
-        )
-
-    if policy.always_escalate_if_medical_advice and looks_like_medical_advice(text):
-        return "ESCALATE", "policy: medical decision support"
-
-    if policy.always_escalate_if_legal_interpretation and looks_like_legal_question(text):
-        return "ESCALATE", "policy: legal / regulatory interpretation"
-
-    if policy.always_escalate_if_hr_sensitive and looks_like_hr_sensitive(text):
-        return "ESCALATE", "policy: high-stakes HR communication"
-
-    if policy.always_escalate_if_workplace_complaint and looks_like_workplace_complaint(
-        text
-    ):
-        return "ESCALATE", "policy: workplace complaint gray area"
-
-    action: Action = "ALLOW" if parsed.is_safe else "BLOCK"
-    return action, None
+    result = explain_route(text, parsed, policy)
+    return result.action, result.escalation_reason
 
 
 def _strip_code_fences(text: str) -> str:
