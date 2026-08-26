@@ -23,6 +23,7 @@ Every design choice must be defensible in a 30+ minute technical deep-dive and m
   - Model never sees either label during evaluation
 - Eval runner: `scripts/run_golden_baseline.py` scores policy-verdict and system-action agreement on the locked (computed) path, and still prints self-report as an audit comparison
 - Latest locked-path eval (`results/golden_eval_20260818T200123Z.json`) with traces (`results/golden_traces_20260818T200123Z.jsonl`): policy 17/20 (85%), action 17/20 (85%). Every row `confidence_source=computed`. P50 ~470ms / P95 ~493ms. gd-013 now ESCALATEs via `operational_pii`; remaining action misses are gd-007 / gd-010 (EXPLOITATION over-fire) and gd-016 (certain-UNSAFE vs intent-ESCALATE).
+- Live CLI (`scripts/moderate_cli.py`): start with no args; it loads once and waits at `post>`. Enter submits; same `evaluate()` decision as golden eval. Optional `FileTraceStore` at `results/live_traces.jsonl`.
 
 ## Design decisions & trade-offs
 
@@ -110,6 +111,10 @@ Every `evaluate()` builds a `DecisionTrace` from the actual routing control flow
 
 This is deliberately not OpenTelemetry. One JSON object per decision is enough to answer "why this action" in a deep-dive, and it stays local-first.
 
+### Live CLI
+
+Demo wrapper only. Start it with no args and leave it running: `python scripts/moderate_cli.py`. It loads the model once, then waits at `post>`. Type a post, press Enter to submit, see the decision, wait again. One-shot is still `python scripts/moderate_cli.py "post text"`. `--trace-path` / `--no-trace` / `/trace on|off` attach the existing `FileTraceStore`; no separate routing path.
+
 ### Evaluation
 
 The golden runner reports:
@@ -154,5 +159,6 @@ False ALLOW on high-severity remains the most important failure mode to watch.
 4. Minimal evaluation harness against the golden set ← done (dual accuracy)
 5. Lock the winning confidence source from the golden-set head-to-head ← done
 6. Decision tracing (why this action, persist traces) ← done
+7. Live CLI for arbitrary posts (`scripts/moderate_cli.py`) ← done
 
 Resist: multi-tenant, full OpenTelemetry, BYOK, vector caches, RL, packaging polish. Remaining high-signal gaps: EXPLOITATION category over-escalate (gd-007/010), certain-UNSAFE vs intent-ESCALATE (gd-016). Operational PII false ALLOW (gd-013) is now a policy heuristic (`always_escalate_if_operational_pii`).

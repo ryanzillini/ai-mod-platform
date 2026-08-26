@@ -32,6 +32,9 @@ This is supporting evidence alongside real production experience (Khoros multi-L
 ## Explicit non-goals for v1
 Multi-tenant isolation, full observability stack, continuous learning / RL, packaging polish, cloud deployment scaffolding, vector caches.
 
+## Live CLI (demo)
+Start and leave it waiting: `python scripts/moderate_cli.py` — type a post, Enter to submit, see the decision. One-shot: `python scripts/moderate_cli.py "post text"`. Same `evaluate()` loop as golden eval. Optional traces: `--trace-path`, `--no-trace`, `/trace on|off`.
+
 ## Evaluation hygiene
 - Golden set lives in data/golden_dataset.json
 - policy_verdict = ground truth of the content (ALLOW | BLOCK)

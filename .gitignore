@@ -14,6 +14,7 @@ __pycache__/
 benchmarks/*.json
 benchmarks/*.csv
 traces/
+results/live_traces.jsonl
 
 # Hugging Face / Downloaded Model Weights
 models/
