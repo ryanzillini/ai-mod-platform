@@ -44,6 +44,7 @@ class DecisionPolicy:
     always_escalate_if_hr_sensitive: bool = True
     always_escalate_if_workplace_complaint: bool = True
     always_escalate_if_operational_pii: bool = True
+    always_escalate_if_regulatory_avoidance: bool = True
 
 
 class ParsedClassification(NamedTuple):
@@ -119,6 +120,61 @@ def looks_like_workplace_complaint(text: str) -> bool:
             "colleague",
         )
     )
+
+
+_EXPLOITATION_PERSON_RE = re.compile(
+    r"\b(minors?|children|child|underage|kids?)\b",
+    re.I,
+)
+# 3B often dumps EXPLOITATION on clear fraud / weapons how-tos. These cues
+# identify a competing clear-BLOCK category so the high-severity rule does not
+# steal a correct BLOCK.
+_COMPETING_CLEAR_BLOCK_CUES = (
+    "for fraud",
+    "synthetic identit",
+    "improvised explosive",
+    "explosive",
+    "household chemicals",
+)
+
+
+def looks_like_exploitation(text: str) -> bool:
+    """Person-targeted exploitation (minors / children), not 'exploit a system'."""
+    return bool(_EXPLOITATION_PERSON_RE.search(text))
+
+
+def _ignore_exploitation_label(text: str) -> bool:
+    """True when EXPLOITATION is a noisy label on a clear competing BLOCK."""
+    if looks_like_exploitation(text):
+        return False
+    t = text.lower()
+    return any(cue in t for cue in _COMPETING_CLEAR_BLOCK_CUES)
+
+
+def looks_like_regulatory_avoidance(text: str) -> bool:
+    """Actionable request to evade named reporting (CTR/SAR), not clear fraud how-to.
+
+    High-confidence UNSAFE is still the wrong auto-action when the ask is
+    'how do I avoid the report' rather than 'how do I commit fraud'.
+    """
+    t = text.lower()
+    has_regime = bool(re.search(r"\b(ctr|sar)\b", t)) or any(
+        phrase in t
+        for phrase in (
+            "currency transaction report",
+            "suspicious activity report",
+        )
+    )
+    has_evasion = any(
+        phrase in t
+        for phrase in (
+            "without triggering",
+            "avoid reporting",
+            "evade reporting",
+            "without reporting",
+        )
+    )
+    return has_regime and has_evasion
 
 
 _ACCOUNT_NUMBER_RE = re.compile(r"\b\d{4}[-\s]\d{4}[-\s]\d{4}(?:[-\s]\d{4})?\b")
@@ -239,7 +295,12 @@ def explain_route(
     confidence = parsed.confidence
     steps: list[RoutingStep] = []
 
-    matched = [cat for cat in categories if cat in policy.always_escalate_categories]
+    matched = [
+        cat
+        for cat in categories
+        if cat in policy.always_escalate_categories
+        and not (cat == "EXPLOITATION" and _ignore_exploitation_label(text))
+    ]
     if matched:
         steps.append(
             RoutingStep("high_severity_category", True, ",".join(matched))
@@ -250,13 +311,13 @@ def explain_route(
             tuple(steps),
             "high_severity_category",
         )
-    steps.append(
-        RoutingStep(
-            "high_severity_category",
-            False,
-            "none" if not categories else ",".join(categories),
-        )
-    )
+    if any(cat == "EXPLOITATION" for cat in categories) and _ignore_exploitation_label(
+        text
+    ):
+        skip_detail = "EXPLOITATION ignored (competing clear-unsafe cues)"
+    else:
+        skip_detail = "none" if not categories else ",".join(categories)
+    steps.append(RoutingStep("high_severity_category", False, skip_detail))
 
     if confidence < policy.confidence_threshold:
         detail = f"{confidence:.2f} < {policy.confidence_threshold:.2f}"
@@ -305,6 +366,12 @@ def explain_route(
             policy.always_escalate_if_operational_pii,
             looks_like_operational_pii,
             "policy: operational PII / live identifiers",
+        ),
+        (
+            "regulatory_avoidance",
+            policy.always_escalate_if_regulatory_avoidance,
+            looks_like_regulatory_avoidance,
+            "policy: regulatory-avoidance request",
         ),
     )
     for rule, enabled, matcher, reason in domain_rules:

@@ -65,6 +65,7 @@ def policy_snapshot(policy: DecisionPolicy) -> dict:
         "always_escalate_if_hr_sensitive": policy.always_escalate_if_hr_sensitive,
         "always_escalate_if_workplace_complaint": policy.always_escalate_if_workplace_complaint,
         "always_escalate_if_operational_pii": policy.always_escalate_if_operational_pii,
+        "always_escalate_if_regulatory_avoidance": policy.always_escalate_if_regulatory_avoidance,
     }
 
 
