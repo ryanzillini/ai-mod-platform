@@ -1,7 +1,12 @@
 import pytest
 import numpy as np
-from src.slm_engine import LocalSLMEngine
 from src.policy import parse_model_output, route_decision
+from src.slm_engine import LocalSLMEngine, mlx_available
+
+pytestmark = pytest.mark.skipif(
+    not mlx_available(),
+    reason="Local MLX model is Apple Silicon only; CI uses the LangGraph replay gate",
+)
 
 
 @pytest.fixture(scope="module")

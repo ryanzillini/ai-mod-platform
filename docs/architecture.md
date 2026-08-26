@@ -1,7 +1,7 @@
 # Decision Agent System – Architecture Notes (Living Document)
 
-**Last updated:** 2026-08-18  
-**Status:** Decision tracing in place (structured why + JSONL persist)
+**Last updated:** 2026-08-26  
+**Status:** LangGraph HITL + CI routing gate on top of the existing local decision agent
 
 ## Purpose of this system
 
@@ -23,6 +23,9 @@ Every design choice must be defensible in a 30+ minute technical deep-dive and m
   - Model never sees either label during evaluation
 - Eval runner: `scripts/run_golden_baseline.py` scores policy-verdict and system-action agreement on the locked (computed) path, and still prints self-report as an audit comparison
 - Latest locked-path eval (`results/golden_eval_20260818T200123Z.json`) with traces (`results/golden_traces_20260818T200123Z.jsonl`): policy 17/20 (85%), action 17/20 (85%). Every row `confidence_source=computed`. P50 ~470ms / P95 ~493ms. gd-013 now ESCALATEs via `operational_pii`; remaining action misses are gd-007 / gd-010 (EXPLOITATION over-fire) and gd-016 (certain-UNSAFE vs intent-ESCALATE).
+- LangGraph (`src/graph.py`): `classify → route → review`. `review` calls `interrupt()` on ESCALATE and requires a checkpointer. Default saver is `InMemorySaver` (process-local; paused threads die with the process).
+- CI routing gate (`src/eval_gate.py`, `.github/workflows/ci.yml`): replay classifications in `data/ci_replay_classifications.json` through the graph. Scores `expected_system_action` and requires gold ESCALATE to pause. No MLX. No LangSmith key. A policy-flag mutation (medical / operational PII / confidence threshold) fails the gate.
+- Optional LangSmith: `src/observability.py` enables tracing only when `LANGSMITH_API_KEY` is set. Export is best-effort and must not break local/CI runs.
 
 ## Design decisions & trade-offs
 
@@ -110,6 +113,21 @@ Every `evaluate()` builds a `DecisionTrace` from the actual routing control flow
 
 This is deliberately not OpenTelemetry. One JSON object per decision is enough to answer "why this action" in a deep-dive, and it stays local-first.
 
+### LangGraph wrap (2026-08-26)
+
+The existing `_decide` / `DecisionPolicy` path is the source of truth. LangGraph does not reimplement routing. It sequences classify → route → human review.
+
+Why wrap instead of rewrite: the interview-defensible core is still the dual-label golden set, computed confidence, and separable policy. The consulting-shaped gap was "no graph, no interrupt, no merge-queue eval." Those are now real, thin, and testable on Linux CI.
+
+Classifier split:
+
+- `ReplayClassifier` — CI and this Cloud/Linux environment. Explicit classification per golden id. Labels still never go to a model.
+- `MlxClassifier` — optional Mac path around `LocalSLMEngine`. Not executed in CI.
+
+`gd-011` is the honest fixture exception: gold `expected_categories` includes `EXPLOITATION`, but `always_escalate_categories={"EXPLOITATION"}` would steal `expected_system_action=BLOCK`. Replay omits the category. The last live 3B run also refused without a category and BLOCKed. Category over-fire on gd-007/010 remains a live-model miss, not a CI-gate miss.
+
+`InMemorySaver` vs production: interrupt/resume is proven in-process. Durability across restart is an acknowledged miss. Do not claim a production HITL queue from this repo.
+
 ### Evaluation
 
 The golden runner reports:
@@ -154,5 +172,6 @@ False ALLOW on high-severity remains the most important failure mode to watch.
 4. Minimal evaluation harness against the golden set ← done (dual accuracy)
 5. Lock the winning confidence source from the golden-set head-to-head ← done
 6. Decision tracing (why this action, persist traces) ← done
+7. LangGraph + interrupt HITL + CI routing gate ← done (this slice)
 
-Resist: multi-tenant, full OpenTelemetry, BYOK, vector caches, RL, packaging polish. Remaining high-signal gaps: EXPLOITATION category over-escalate (gd-007/010), certain-UNSAFE vs intent-ESCALATE (gd-016). Operational PII false ALLOW (gd-013) is now a policy heuristic (`always_escalate_if_operational_pii`).
+Resist: multi-tenant, full OpenTelemetry, BYOK, vector caches, RL, packaging polish. Remaining high-signal gaps: EXPLOITATION category over-escalate (gd-007/010), certain-UNSAFE vs intent-ESCALATE (gd-016). Operational PII false ALLOW (gd-013) is now a policy heuristic (`always_escalate_if_operational_pii`). Durable checkpointer and live-model CI are explicit non-goals for this slice.

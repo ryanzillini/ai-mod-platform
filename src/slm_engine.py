@@ -1,13 +1,42 @@
 import time
 from typing import List, Literal, NamedTuple, Optional, Union
 
-import mlx.core as mx
-from mlx_lm import load, generate
-from mlx_lm.generate import generate_step
 from pydantic import BaseModel, Field
 
 from src.policy import DecisionPolicy, ParsedClassification, explain_route, parse_model_output, route_decision
 from src.trace import DecisionTrace, FileTraceStore, build_trace, parse_failure_result
+
+# MLX is Apple Silicon local-only. Routing, traces, and the LangGraph CI path
+# must import this module without loading mlx.
+_MLX = None
+
+
+def mlx_available() -> bool:
+    try:
+        import mlx.core  # noqa: F401
+        import mlx_lm  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _mlx():
+    """Load MLX modules on first local-inference call."""
+    global _MLX
+    if _MLX is not None:
+        return _MLX
+    try:
+        import mlx.core as mx
+        from mlx_lm import generate, load
+        from mlx_lm.generate import generate_step
+    except ImportError as exc:
+        raise RuntimeError(
+            "Local MLX inference is not available on this machine. "
+            "CI and Linux use the LangGraph replay classifier; "
+            "install mlx-lm on Apple Silicon to run LocalSLMEngine.evaluate()."
+        ) from exc
+    _MLX = (mx, load, generate, generate_step)
+    return _MLX
 
 SYSTEM_PROMPT = (
     "You are a classifier, not an assistant. Do not answer the user request.\n"
@@ -134,6 +163,7 @@ def _token_ids_for_label(tokenizer, formatted_prompt: str, continuations: tuple[
 def _mass_at(logprobs, token_ids: list[int]) -> float:
     if not token_ids:
         return 0.0
+    mx, *_rest = _mlx()
     total = 0.0
     for token_id in token_ids:
         total += float(mx.exp(logprobs[token_id]).item())
@@ -150,6 +180,7 @@ def compute_decision_confidence(
     `prompt` is the chat-formatted string passed to generate() (not the user text).
     Uses generate_step for a single constrained look at the next-token distribution.
     """
+    mx, _load, _generate, generate_step = _mlx()
     prefilled = prompt + _VERDICT_PREFIX
     prompt_ids = encode_prompt_tokens(tokenizer, prefilled)
     safe_ids = _token_ids_for_label(tokenizer, prompt, _SAFE_CONTINUATIONS)
@@ -184,6 +215,7 @@ class LocalSLMEngine:
     ):
         print(f"[*] Loading local SLM into Apple Silicon Unified Memory: {model_id}...")
         t0 = time.perf_counter()
+        _mx, load, _generate, _generate_step = _mlx()
         self.model, self.tokenizer = load(model_id)
         load_time = (time.perf_counter() - t0) * 1000
         print(f"[✓] Model ready in {load_time:.2f}ms")
@@ -211,6 +243,7 @@ class LocalSLMEngine:
         formatted_prompt = self._format_chat_prompt(prompt)
 
         t_start = time.perf_counter()
+        _mx, _load, generate, _generate_step = _mlx()
         raw_output = generate(
             self.model,
             self.tokenizer,

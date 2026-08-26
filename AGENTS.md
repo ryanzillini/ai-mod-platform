@@ -18,8 +18,9 @@ This is supporting evidence alongside real production experience (Khoros multi-L
 2. Real confidence estimation that drives routing (done – token-distribution locked; self-report is audit-only)
 3. Explicit ESCALATE path (low confidence OR policy-forced: EXPLOITATION, medical/legal/HR, workplace complaint, operational PII)
 4. Decision tracing (done – structured why + JSONL)
-5. Minimal evaluation harness against golden set
-6. Separable policy layer
+5. Minimal evaluation harness against golden set (done – live MLX runner + CI replay gate)
+6. Separable policy layer (done)
+7. LangGraph HITL interrupt + CI eval gate (done – process-local checkpointer; no durable queue)
 
 ## Implementation rules
 - Move in thin vertical slices only
