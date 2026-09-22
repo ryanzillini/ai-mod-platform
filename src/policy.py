@@ -1,8 +1,8 @@
 """Separable decision policy: parse model output, apply routing rules.
 
-The SLM only classifies (SAFE/UNSAFE + confidence). This module maps that
-classification onto ALLOW / BLOCK / ESCALATE. Policy can force escalation
-even when the model is highly confident.
+The SLM only classifies (SAFE/UNSAFE + confidence). Detectors only report
+hits. This module maps classification + hits onto ALLOW / BLOCK / ESCALATE.
+Policy can force escalation even when the model is highly confident.
 """
 
 from __future__ import annotations
@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from typing import List, Literal, NamedTuple, Optional
+
+from src.detectors import DetectorResult, detector_hit, run_detectors
 
 Action = Literal["ALLOW", "BLOCK", "ESCALATE"]
 PolicyVerdict = Literal["ALLOW", "BLOCK"]
@@ -52,160 +54,6 @@ class ParsedClassification(NamedTuple):
     categories: List[str]
     confidence: float
     reason: str
-
-
-def looks_like_medical_advice(text: str) -> bool:
-    """Keyword heuristic: clinical decision-support, not a mention of healthcare."""
-    t = text.lower()
-    cues = (
-        "patient",
-        "dosage",
-        "medication",
-        "troponin",
-        "chest pain",
-        "shortness of breath",
-        "prescribe",
-        "next medication",
-        "what should i order",
-        "order right now",
-        "clinical presentation",
-    )
-    return sum(1 for cue in cues if cue in t) >= 2
-
-
-def looks_like_legal_question(text: str) -> bool:
-    """Keyword heuristic: asking the model to interpret law / contract / regulation."""
-    t = text.lower()
-    return any(
-        phrase in t
-        for phrase in (
-            "does this violate",
-            "violate our current",
-            "gdpr requirements",
-            "data processing agreement",
-            "legal advice",
-            "against the law",
-            "regulatory interpretation",
-        )
-    )
-
-
-def looks_like_hr_sensitive(text: str) -> bool:
-    """Keyword heuristic: high-stakes workforce / internal HR communications."""
-    t = text.lower()
-    return any(
-        phrase in t
-        for phrase in (
-            "reduction in force",
-            "planned reduction",
-            "layoff",
-            "layoffs",
-            "rif ",
-        )
-    )
-
-
-def looks_like_workplace_complaint(text: str) -> bool:
-    """Keyword heuristic: gray-area professional complaint about a person."""
-    t = text.lower()
-    if "complaint" not in t:
-        return False
-    return any(
-        phrase in t
-        for phrase in (
-            "strongly worded",
-            "professional complaint",
-            "support engineer",
-            "coworker",
-            "colleague",
-        )
-    )
-
-
-_EXPLOITATION_PERSON_RE = re.compile(
-    r"\b(minors?|children|child|underage|kids?)\b",
-    re.I,
-)
-# 3B often dumps EXPLOITATION on clear fraud / weapons how-tos. These cues
-# identify a competing clear-BLOCK category so the high-severity rule does not
-# steal a correct BLOCK.
-_COMPETING_CLEAR_BLOCK_CUES = (
-    "for fraud",
-    "synthetic identit",
-    "improvised explosive",
-    "explosive",
-    "household chemicals",
-)
-
-
-def looks_like_exploitation(text: str) -> bool:
-    """Person-targeted exploitation (minors / children), not 'exploit a system'."""
-    return bool(_EXPLOITATION_PERSON_RE.search(text))
-
-
-def _ignore_exploitation_label(text: str) -> bool:
-    """True when EXPLOITATION is a noisy label on a clear competing BLOCK."""
-    if looks_like_exploitation(text):
-        return False
-    t = text.lower()
-    return any(cue in t for cue in _COMPETING_CLEAR_BLOCK_CUES)
-
-
-def looks_like_regulatory_avoidance(text: str) -> bool:
-    """Actionable request to evade named reporting (CTR/SAR), not clear fraud how-to.
-
-    High-confidence UNSAFE is still the wrong auto-action when the ask is
-    'how do I avoid the report' rather than 'how do I commit fraud'.
-    """
-    t = text.lower()
-    has_regime = bool(re.search(r"\b(ctr|sar)\b", t)) or any(
-        phrase in t
-        for phrase in (
-            "currency transaction report",
-            "suspicious activity report",
-        )
-    )
-    has_evasion = any(
-        phrase in t
-        for phrase in (
-            "without triggering",
-            "avoid reporting",
-            "evade reporting",
-            "without reporting",
-        )
-    )
-    return has_regime and has_evasion
-
-
-_ACCOUNT_NUMBER_RE = re.compile(r"\b\d{4}[-\s]\d{4}[-\s]\d{4}(?:[-\s]\d{4})?\b")
-_SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-_BULK_PII_DUMP_CUES = (
-    "list every",
-    "list all",
-    "dump every",
-    "exfiltrate",
-)
-
-
-def looks_like_operational_pii(text: str) -> bool:
-    """Live identifiers in operational content, not a bulk PII dump.
-
-    Requires two independent cues so a lone 'SSN' in a clear exfil request
-    does not steal a confident BLOCK.
-    """
-    t = text.lower()
-    if any(phrase in t for phrase in _BULK_PII_DUMP_CUES):
-        return False
-
-    signals = (
-        "account number" in t or "full account" in t,
-        "date of birth" in t or bool(re.search(r"\bdob\b", t)),
-        bool(re.search(r"\bssn\b", t)) or "social security" in t,
-        "routing number" in t,
-        bool(_ACCOUNT_NUMBER_RE.search(text)),
-        bool(_SSN_RE.search(text)),
-    )
-    return sum(1 for hit in signals if hit) >= 2
 
 
 def parse_model_output(raw: str) -> Optional[ParsedClassification]:
@@ -278,28 +126,44 @@ class RoutingResult(NamedTuple):
     escalation_reason: Optional[str]
     steps: tuple[RoutingStep, ...]
     winning_rule: str
+    detectors: tuple[DetectorResult, ...] = ()
+
+
+def _ignore_noisy_exploitation(detectors: tuple[DetectorResult, ...]) -> bool:
+    """Policy combines two sensors: competing BLOCK cues, not person-targeted."""
+    return detector_hit(detectors, "competing_clear_block") and not detector_hit(
+        detectors, "exploitation"
+    )
 
 
 def explain_route(
     text: str,
     parsed: ParsedClassification,
     policy: DecisionPolicy | None = None,
+    detector_results: tuple[DetectorResult, ...] | None = None,
 ) -> RoutingResult:
     """Route a classification and record which rules were evaluated.
 
     Short-circuits: rules after the winner are not evaluated. That is the
     real control flow, not a reconstructed post-hoc explanation.
+
+    Detectors always run (stage 1) even when a later routing rule wins.
+    They do not choose ALLOW / BLOCK / ESCALATE.
     """
     policy = policy or DecisionPolicy()
+    detectors = (
+        detector_results if detector_results is not None else run_detectors(text)
+    )
     categories = parsed.categories
     confidence = parsed.confidence
     steps: list[RoutingStep] = []
+    ignore_exploitation = _ignore_noisy_exploitation(detectors)
 
     matched = [
         cat
         for cat in categories
         if cat in policy.always_escalate_categories
-        and not (cat == "EXPLOITATION" and _ignore_exploitation_label(text))
+        and not (cat == "EXPLOITATION" and ignore_exploitation)
     ]
     if matched:
         steps.append(
@@ -310,10 +174,9 @@ def explain_route(
             "policy: high-severity category",
             tuple(steps),
             "high_severity_category",
+            detectors,
         )
-    if any(cat == "EXPLOITATION" for cat in categories) and _ignore_exploitation_label(
-        text
-    ):
+    if any(cat == "EXPLOITATION" for cat in categories) and ignore_exploitation:
         skip_detail = "EXPLOITATION ignored (competing clear-unsafe cues)"
     else:
         skip_detail = "none" if not categories else ",".join(categories)
@@ -327,6 +190,7 @@ def explain_route(
             f"low confidence ({detail})",
             tuple(steps),
             "low_confidence",
+            detectors,
         )
     steps.append(
         RoutingStep(
@@ -340,65 +204,79 @@ def explain_route(
         (
             "medical_decision_support",
             policy.always_escalate_if_medical_advice,
-            looks_like_medical_advice,
+            "medical_decision_support",
             "policy: medical decision support",
         ),
         (
             "legal_regulatory",
             policy.always_escalate_if_legal_interpretation,
-            looks_like_legal_question,
+            "legal_regulatory",
             "policy: legal / regulatory interpretation",
         ),
         (
             "hr_sensitive",
             policy.always_escalate_if_hr_sensitive,
-            looks_like_hr_sensitive,
+            "hr_sensitive",
             "policy: high-stakes HR communication",
         ),
         (
             "workplace_complaint",
             policy.always_escalate_if_workplace_complaint,
-            looks_like_workplace_complaint,
+            "workplace_complaint",
             "policy: workplace complaint gray area",
         ),
         (
             "operational_pii",
             policy.always_escalate_if_operational_pii,
-            looks_like_operational_pii,
+            "operational_pii",
             "policy: operational PII / live identifiers",
         ),
         (
             "regulatory_avoidance",
             policy.always_escalate_if_regulatory_avoidance,
-            looks_like_regulatory_avoidance,
+            "regulatory_avoidance",
             "policy: regulatory-avoidance request",
         ),
     )
-    for rule, enabled, matcher, reason in domain_rules:
+    for rule, enabled, detector_id, reason in domain_rules:
         if not enabled:
             continue
-        if matcher(text):
+        if detector_hit(detectors, detector_id):
             steps.append(RoutingStep(rule, True, "matched"))
-            return RoutingResult("ESCALATE", reason, tuple(steps), rule)
+            return RoutingResult(
+                "ESCALATE", reason, tuple(steps), rule, detectors
+            )
         steps.append(RoutingStep(rule, False, "no match"))
 
     action: Action = "ALLOW" if parsed.is_safe else "BLOCK"
+    if action == "ALLOW" and any(not item.ok for item in detectors):
+        steps.append(
+            RoutingStep("detector_error", True, "detector exception; refuse ALLOW")
+        )
+        return RoutingResult(
+            "ESCALATE",
+            "detector error (fail closed)",
+            tuple(steps),
+            "detector_error",
+            detectors,
+        )
     detail = "SAFE → ALLOW" if parsed.is_safe else "UNSAFE → BLOCK"
     steps.append(RoutingStep("classification", True, detail))
-    return RoutingResult(action, None, tuple(steps), "classification")
+    return RoutingResult(action, None, tuple(steps), "classification", detectors)
 
 
 def route_decision(
     text: str,
     parsed: ParsedClassification,
     policy: DecisionPolicy | None = None,
+    detector_results: tuple[DetectorResult, ...] | None = None,
 ) -> tuple[Action, Optional[str]]:
     """Map a parsed classification onto a system action.
 
     Order matches the v1 brief: high-severity category, then low confidence,
     then domain policy rules, else ALLOW/BLOCK from the classification.
     """
-    result = explain_route(text, parsed, policy)
+    result = explain_route(text, parsed, policy, detector_results)
     return result.action, result.escalation_reason
 
 

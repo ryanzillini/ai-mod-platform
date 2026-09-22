@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Literal, Optional
 
+from src.detectors import DetectorResult, run_detectors
 from src.policy import DecisionPolicy, RoutingResult, RoutingStep
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 Action = Literal["ALLOW", "BLOCK", "ESCALATE"]
 PolicyVerdict = Literal["ALLOW", "BLOCK"]
@@ -26,6 +27,13 @@ class TraceStep(BaseModel):
     detail: str
 
 
+class DetectorSpan(BaseModel):
+    detector_id: str
+    hit: bool
+    detail: str
+    ok: bool = True
+
+
 class DecisionTrace(BaseModel):
     trace_id: str
     timestamp_utc: str
@@ -35,6 +43,7 @@ class DecisionTrace(BaseModel):
     policy: dict
     classification: dict
     confidence_source: ConfidenceSource
+    detectors: List[DetectorSpan] = Field(default_factory=list)
     steps: List[TraceStep]
     winning_rule: str
     why: str
@@ -69,9 +78,15 @@ def policy_snapshot(policy: DecisionPolicy) -> dict:
     }
 
 
-def parse_failure_result() -> RoutingResult:
+def parse_failure_result(
+    detectors: tuple[DetectorResult, ...] | None = None,
+    text: str = "",
+) -> RoutingResult:
+    spans = detectors if detectors is not None else run_detectors(text)
     step = RoutingStep("parse_failure", True, "unparseable model output")
-    return RoutingResult("ESCALATE", "parse_failure", (step,), "parse_failure")
+    return RoutingResult(
+        "ESCALATE", "parse_failure", (step,), "parse_failure", spans
+    )
 
 
 def build_trace(
@@ -97,6 +112,15 @@ def build_trace(
         policy=policy_snapshot(policy),
         classification=classification,
         confidence_source=confidence_source,
+        detectors=[
+            DetectorSpan(
+                detector_id=d.detector_id,
+                hit=d.hit,
+                detail=d.detail,
+                ok=d.ok,
+            )
+            for d in routing.detectors
+        ],
         steps=[TraceStep(rule=s.rule, fired=s.fired, detail=s.detail) for s in routing.steps],
         winning_rule=routing.winning_rule,
         why=why,
@@ -115,8 +139,19 @@ def format_trace(trace: DecisionTrace) -> str:
         f"   source={trace.confidence_source}  "
         f"computed={_fmt(trace.classification.get('computed_confidence'))}  "
         f"self={_fmt(trace.classification.get('self_reported_confidence'))}",
-        "   steps:",
+        "   detectors:",
     ]
+    if not trace.detectors:
+        lines.append("     - (none)")
+    for span in trace.detectors:
+        if not span.ok:
+            mark = "err"
+        elif span.hit:
+            mark = "hit"
+        else:
+            mark = "miss"
+        lines.append(f"     - {span.detector_id:<28} {mark}  {span.detail}")
+    lines.append("   steps:")
     for step in trace.steps:
         mark = "FIRE" if step.fired else "skip"
         lines.append(f"     - {step.rule:<28} {mark}  {step.detail}")

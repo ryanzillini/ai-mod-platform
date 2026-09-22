@@ -1,16 +1,18 @@
 """Unit tests for parser + policy routing. No model load required."""
 
+from src.detectors import (
+    looks_like_exploitation,
+    looks_like_hr_sensitive,
+    looks_like_legal_question,
+    looks_like_medical_advice,
+    looks_like_operational_pii,
+    looks_like_regulatory_avoidance,
+    looks_like_workplace_complaint,
+)
 from src.policy import (
     DecisionPolicy,
     parse_model_output,
     route_decision,
-    looks_like_medical_advice,
-    looks_like_legal_question,
-    looks_like_hr_sensitive,
-    looks_like_workplace_complaint,
-    looks_like_operational_pii,
-    looks_like_exploitation,
-    looks_like_regulatory_avoidance,
 )
 
 

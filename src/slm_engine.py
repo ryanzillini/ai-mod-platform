@@ -6,6 +6,7 @@ from mlx_lm import load, generate
 from mlx_lm.generate import generate_step
 from pydantic import BaseModel, Field
 
+from src.detectors import run_detectors
 from src.policy import DecisionPolicy, ParsedClassification, explain_route, parse_model_output, route_decision
 from src.trace import DecisionTrace, FileTraceStore, build_trace, parse_failure_result
 
@@ -243,9 +244,10 @@ class LocalSLMEngine:
         computed_dist = _coerce_computed(computed)
         policy = getattr(self, "policy", None) or DecisionPolicy()
         model_id = getattr(self, "model_id", "unknown")
+        detectors = run_detectors(prompt)
         parsed = parse_model_output(raw_output)
         if parsed is None:
-            routing = parse_failure_result()
+            routing = parse_failure_result(detectors)
             trace = build_trace(
                 input_text=prompt,
                 model_id=model_id,
@@ -286,7 +288,7 @@ class LocalSLMEngine:
                 trace=trace,
             )
 
-        action_self, esc_self = route_decision(prompt, parsed, policy)
+        action_self, esc_self = route_decision(prompt, parsed, policy, detectors)
         live_parsed = parsed
         if computed_dist is not None:
             live_parsed = parsed._replace(confidence=computed_dist.score)
@@ -295,7 +297,7 @@ class LocalSLMEngine:
         else:
             confidence_source = "self_report_fallback"
             confidence_score = parsed.confidence
-        live = explain_route(prompt, live_parsed, policy)
+        live = explain_route(prompt, live_parsed, policy, detectors)
         action_comp, esc_comp = live.action, live.escalation_reason
         if computed_dist is None:
             action_comp, esc_comp = action_self, esc_self

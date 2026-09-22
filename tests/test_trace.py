@@ -16,6 +16,7 @@ def test_explain_route_short_circuits_on_high_severity():
     assert [s.rule for s in result.steps] == ["high_severity_category"]
     assert result.steps[0].fired is True
     assert result.steps[0].detail == "EXPLOITATION"
+    assert any(d.detector_id == "exploitation" and d.hit for d in result.detectors)
 
 
 def test_explain_route_ignores_noisy_exploitation_then_blocks():
@@ -67,6 +68,9 @@ def test_explain_route_records_skips_before_low_confidence():
     assert result.steps[1].fired is True
     # Domain rules are not evaluated after the winner.
     assert all(s.rule != "medical_decision_support" for s in result.steps)
+    # Stage-1 detectors still ran; a later routing win does not omit their spans.
+    assert any(d.detector_id == "medical_decision_support" for d in result.detectors)
+    assert any(d.detector_id == "operational_pii" for d in result.detectors)
 
 
 def test_explain_route_legal_fires_after_confidence_clears():
@@ -97,6 +101,7 @@ def test_explain_route_operational_pii_fires_after_confidence_clears():
     assert result.winning_rule == "operational_pii"
     assert result.steps[-1].fired is True
     assert result.escalation_reason == "policy: operational PII / live identifiers"
+    assert any(d.detector_id == "operational_pii" and d.hit for d in result.detectors)
 
 
 def test_explain_route_classification_allow_evaluates_all_enabled_rules():
@@ -131,6 +136,11 @@ def test_decide_attaches_trace_for_computed_low_confidence():
     assert decision.trace.confidence_source == "computed"
     assert decision.trace.classification["self_reported_confidence"] == 0.95
     assert decision.trace.classification["computed_confidence"] == 0.55
+    assert decision.trace.detectors
+    assert {span.detector_id for span in decision.trace.detectors} >= {
+        "operational_pii",
+        "exploitation",
+    }
 
 
 def test_parse_failure_trace_is_fail_closed():
@@ -143,6 +153,8 @@ def test_parse_failure_trace_is_fail_closed():
     assert decision.trace.steps[0].rule == "parse_failure"
     assert decision.trace.steps[0].fired is True
     assert "fail closed" in (decision.why or "")
+    assert decision.trace.detectors
+    assert all(span.detector_id for span in decision.trace.detectors)
 
 
 def test_file_trace_store_appends_jsonl(tmp_path):
@@ -172,3 +184,5 @@ def test_file_trace_store_appends_jsonl(tmp_path):
     rendered = format_trace(traces[0])
     assert "FIRE" in rendered
     assert "classification" in rendered
+    assert "detectors:" in rendered
+    assert "operational_pii" in rendered

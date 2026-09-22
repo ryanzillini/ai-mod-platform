@@ -24,6 +24,7 @@ This is supporting evidence alongside real production experience (Khoros multi-L
 ## Implementation rules
 - Move in thin vertical slices only
 - Confidence must actually change the action (not decorative)
+- Detectors report hits only; `explain_route` owns ALLOW / BLOCK / ESCALATE
 - Model must never see golden-set labels at inference time
 - Prefer a clear DecisionVerdict + policy object over scattered flags
 - Document trade-offs in docs/architecture.md as you go

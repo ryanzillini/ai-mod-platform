@@ -1,7 +1,7 @@
 # Decision Agent System – Architecture Notes (Living Document)
 
-**Last updated:** 2026-08-18  
-**Status:** Decision tracing in place (structured why + JSONL persist)
+**Last updated:** 2026-08-25  
+**Status:** Detectors are a named stage; policy still owns ALLOW / BLOCK / ESCALATE
 
 ## Purpose of this system
 
@@ -22,8 +22,9 @@ Every design choice must be defensible in a 30+ minute technical deep-dive and m
   - `expected_system_action`: what the agent should output (ALLOW | BLOCK | ESCALATE)
   - Model never sees either label during evaluation
 - Eval runner: `scripts/run_golden_baseline.py` scores policy-verdict and system-action agreement on the locked (computed) path, and still prints self-report as an audit comparison
-- Latest locked-path eval (`results/golden_eval_20260818T200123Z.json`) with traces (`results/golden_traces_20260818T200123Z.jsonl`): policy 17/20 (85%), action 17/20 (85%). Every row `confidence_source=computed`. P50 ~470ms / P95 ~493ms. gd-013 now ESCALATEs via `operational_pii`; remaining action misses are gd-007 / gd-010 (EXPLOITATION over-fire) and gd-016 (certain-UNSAFE vs intent-ESCALATE).
+- Latest locked-path eval after policy patches (`results/golden_eval_20260826T025011Z.json`): policy 17/20 (85%), action **20/20 (100%)**. Detector split is score-neutral (`results/golden_eval_20260826T031240Z.json`): same 17/20 and 20/20. Remaining policy-verdict misses are classifier SAFE vs gold BLOCK on gd-012 / gd-013 / gd-015; the system action is still ESCALATE. gd-007 / gd-010 BLOCK via noisy-`EXPLOITATION` skip; gd-016 ESCALATEs via `regulatory_avoidance`; gd-013 ESCALATEs via `operational_pii`.
 - Live CLI (`scripts/moderate_cli.py`): start with no args; it loads once and waits at `post>`. Enter submits; same `evaluate()` decision as golden eval. Optional `FileTraceStore` at `results/live_traces.jsonl`.
+- Detectors (`src/detectors.py`) are a named stage: they report `{detector_id, hit, detail, ok}` on user text. They never return ALLOW / BLOCK / ESCALATE. `explain_route` still owns the action. Each detector gets a span on the trace even when a later routing rule wins.
 
 ## Design decisions & trade-offs
 
@@ -83,14 +84,15 @@ Self-report's extra action hit used to be the `CONFIDENCE: 0.00` bug accidentall
 
 Routing order after a successful parse:
 
-1. High-severity category (currently `EXPLOITATION`) → ESCALATE
+0. **Detectors (stage 1 of the decision)** — run all text sensors on the user text inside `_decide` (after generation in the live path; this is not a pre-model gate). Output is hits, not an action. Spans are always recorded.
+1. High-severity category (currently `EXPLOITATION`) → ESCALATE, unless policy combines a `competing_clear_block` hit with a non-hit on person-targeted `exploitation` (noisy label on a clear BLOCK how-to)
 2. Confidence below threshold (default 0.80) → ESCALATE
-3. Domain heuristics: medical decision support, legal/regulatory interpretation, high-stakes HR, workplace-complaint gray area, operational PII / live identifiers → ESCALATE
-4. Else ALLOW or BLOCK from the model's SAFE/UNSAFE verdict
+3. Domain hits whose policy flags are enabled: medical, legal/HR, workplace complaint, operational PII, regulatory avoidance → ESCALATE on first match
+4. Else ALLOW or BLOCK from the model's SAFE/UNSAFE verdict. If any detector threw, ALLOW is refused (`detector_error` → ESCALATE). BLOCK is left alone.
 
 So a clinical dosage question can be classified `UNSAFE` at 0.96 confidence and still become `ESCALATE` because policy forbids auto-answering. Same for a wire email that embeds a live account number and DOB: the 3B classifier can call it `SAFE` at ~0.92 (operational context), and policy still forces `ESCALATE` instead of a false ALLOW. That split — **classification vs action** — is the point of the two labels on the golden set.
 
-Domain heuristics are keyword-based on purpose. They are explicit, testable, and easy to swap per tenant later. They are not a second classifier. The operational-PII rule requires two independent identifier cues (account number / DOB / SSN / routing / digit groups) and explicitly does **not** fire on bulk-dump language (`list every`, `exfiltrate`) so a clear PII_LEAK BLOCK (gd-006) is not stolen into ESCALATE.
+Detectors are keyword-based on purpose. They are explicit, testable, and easy to swap per tenant later. They are not a second classifier, and they do not short-circuit routing — policy does. The operational-PII detector requires two independent identifier cues (account number / DOB / SSN / routing / digit groups) and explicitly does **not** fire on bulk-dump language (`list every`, `exfiltrate`) so a clear PII_LEAK BLOCK (gd-006) is not stolen into ESCALATE.
 
 ### Policy separation
 
@@ -105,7 +107,8 @@ Policy (thresholds, always-escalate categories, domain rules) lives in `Decision
 Every `evaluate()` builds a `DecisionTrace` from the actual routing control flow, not a reconstructed story.
 
 - Rules are recorded in evaluation order. After a rule fires, later rules are **not** marked skipped — they were never evaluated. That matches the code.
-- `winning_rule` + `why` are the interview one-liner. `steps` is the evidence.
+- Detector spans are separate from routing steps: sensors always run; routing still short-circuits. `winning_rule` is a policy rule, never a detector id.
+- `winning_rule` + `why` are the interview one-liner. `steps` is the routing evidence; `detectors` is the sensor evidence.
 - Persistence is optional `FileTraceStore` (append-only JSONL). The decision does not fail if a trace write fails.
 - v1 stores full `input_text`. In a regulated environment that would be hashed or redacted; the schema already has a place for a policy snapshot and model id.
 
@@ -144,12 +147,13 @@ False ALLOW on high-severity remains the most important failure mode to watch.
 
 - Self-reported confidence is miscalibrated (the 3B model still emits `0.00` to mean "definitely unsafe"). It is audit-only and does not drive routing.
 - Computed confidence is a first-token SAFE vs UNSAFE score and adds a second prompt prefill
-- Category labels are noisy (`EXPLOITATION` on fraud/explosives), so always-escalate-on-category can over-escalate clear BLOCKs
-- Domain escalation rules are keyword heuristics, not classifiers (operational PII requires two identifier cues and skips bulk-dump phrasing)
+- Category labels are noisy (`EXPLOITATION` on fraud/explosives). Policy ignores that label when detectors report competing clear-BLOCK cues and not person-targeted exploitation
+- Domain sensors are keyword heuristics in `src/detectors.py`, not classifiers (operational PII requires two identifier cues and skips bulk-dump phrasing). Policy combines hits; detectors do not escalate on their own
 - Traces store full input text locally (not redacted); JSONL is not an immutable production log
 - Single small model; no ensemble or cascade
 - Golden set is still small (20) and synthetic
 - No production traffic or online evaluation loop
+- No `policy_id` / prompt hash yet; traces snapshot flags, not a versioned policy document
 
 ## Next thin vertical slices (in order)
 
@@ -160,5 +164,6 @@ False ALLOW on high-severity remains the most important failure mode to watch.
 5. Lock the winning confidence source from the golden-set head-to-head ← done
 6. Decision tracing (why this action, persist traces) ← done
 7. Live CLI for arbitrary posts (`scripts/moderate_cli.py`) ← done
+8. Detectors as stage 1 (hits only; policy owns the action; spans on the trace) ← done
 
-Resist: multi-tenant, full OpenTelemetry, BYOK, vector caches, RL, packaging polish. Remaining high-signal gaps: EXPLOITATION category over-escalate (gd-007/010), certain-UNSAFE vs intent-ESCALATE (gd-016). Operational PII false ALLOW (gd-013) is now a policy heuristic (`always_escalate_if_operational_pii`).
+Resist: multi-tenant, full OpenTelemetry, BYOK, vector caches, RL, packaging polish. Remaining high-signal gaps: versioned `policy_id`, redacted traces, a review-queue record. Action accuracy on the golden set is 20/20 after the N=20 heuristic patches; policy-verdict is still 17/20 because the 3B still calls some escalate-worthy content SAFE.
